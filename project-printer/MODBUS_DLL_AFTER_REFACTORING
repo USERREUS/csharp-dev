@@ -1,0 +1,757 @@
+using System;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Timers;
+using HIES.ModbusTcp;
+
+namespace Hitachi_UX_MBTCP_2_0
+{
+    // перечисления констант для работы с регистром удержания
+    internal enum FLAG : byte
+    {
+        Open = 1,
+        Close = 2
+    }
+
+    // перечисление возможных типов матричных кодов (номер согласно документации по UX)
+    public enum DMCode : byte
+    {
+        DM20x20 = 10,
+        DM22x22 = 11,
+        DM24x24 = 12
+    }
+
+    // перечисление адресов регистров хранения данных только для чтения (согласно документации по UX)
+    internal enum ReadData : int
+    {
+        PrinterSerial = 0x0020,
+        InkViscosity = 0x0057,
+        InkConsumption = 0x0BE3,
+        InkFilterUseTime = 0x0BD0,
+        ReceiveStatus = 0x0001,
+        BaudRate = 0x0B06,
+        PrintCount = 0x0052,
+        ModelName = 0x0010
+    }
+
+    // перечисление адресов регистров записи данных (согласно документации по UX)
+    internal enum WriteData : int
+    {
+        Online_Offline = 0x2490,
+        RemoteOperation = 0x2494,
+        CallMessage = 0x1006,
+        ClearColumn = 0x1000,
+        FormatSetup = 0x103F,
+        HoldingFlag = 0x0000,
+        AddColumn = 0x1023,
+        DeleteColumn = 0x1022,
+        DeleteMessage = 0x25F0,
+        CharacterSize = 0x1042,
+        InterCharacterSpace = 0x1043,
+        BarCode = 0x1045,
+        PrintDataMessageNumber = 0x100D,
+        MessageNameFirstDigit = 0x100E,
+        CharacterCount = 0x0020,
+        CharacteCode = 0x0084
+    }
+
+    // перечислния доступных регистров в данной версии библиотеки
+    internal enum Registers : byte
+    {
+        ReadInputRegister = 0x0003,
+        WriteHoldingRegister = 0x0004
+    }
+
+    // статический класс для вывода скорости передачи данных 
+    internal static class BaudRateConverter
+    {
+        public static readonly int[] buadRate =
+        {
+            150, 300, 600, 1200, 2400, 4800,
+            9600, 19200, 38400, 57600, 115200
+        };
+    }
+
+    // статический класс для осуществления вспомогателных функций 
+    internal static class Helper
+    {
+        // функция преобразования символа в ASCII код
+        public static byte[] StringToByte(Action<string> warningOutPut, string data)
+        {
+            try
+            {
+                int length = data.Length;
+                byte[] bytes = new byte[length];
+                for (int i = 0; i < length; i++)
+                    bytes[i] = Convert.ToByte(data[i]);
+                return bytes;
+            }
+            catch (Exception exception)
+            {
+                DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return new byte[0];
+            }
+        }
+
+        //функция вывода сообщения об ошибке
+        public static void DataOutPut(Action<string> warningOutPut, params string[] data)
+        {
+            StringBuilder resultData = new StringBuilder();
+
+            foreach (var item in data)
+                resultData.Append($"{DateTime.Now} : {item}");
+
+            warningOutPut(resultData.ToString());
+        }
+
+        // функция создания массива байтов для записи в колонку текста
+        // spaceSize - количество нулевых байтов между кодами символов
+        public static byte[] CreateSequence(byte[] bytes, byte spaceSize)
+        {
+            byte[] seq = new byte[bytes.Length * spaceSize];
+
+            int count = 0;
+            int j = 0;
+            for (int i = 0; i < seq.Length; i++)
+            {
+                if (count % (spaceSize - 1) == 0 && count != 0)
+                {
+                    seq[i] = bytes[j];
+                    count = 0;
+                    j++;
+                }
+                else
+                {
+                    seq[i] = 0;
+                    count++;
+                }
+            }
+
+            return seq;
+        }
+
+        // функция для разряжение массива байтов из колонки текста
+        // spaceSize - количество нулевых байтов между кодами символов
+        public static byte[] RejectSequaence(byte[] bytes, byte spaceSize)
+        {
+            byte[] regectResponse = new byte[bytes.Length/2];
+            for (int i = 0; i < bytes.Length; i++)
+                if (i % spaceSize != 0)
+                    regectResponse[i / spaceSize] = bytes[i];
+            return regectResponse;
+        }
+
+        // функция для дополнения сообщения FNC кодов в начале
+        public static byte[] AddFNC(byte[] data)
+        {
+            byte[] result = new byte[data.Length + 4];
+            byte[] FNC = new byte[] { 0x00, 0x00, 0x81, 0xA6 };
+
+            for (int i = 0; i < FNC.Length; i++)
+                result[i] = FNC[i];
+
+            for (int i = 0; i < data.Length; i++)
+                result[i + FNC.Length] = data[i];
+
+            return result;
+        }
+    }
+
+    //класс для имитации работы порта
+    internal class Port
+    {
+        public readonly string IP;
+        public readonly int portNumber;
+        Action<string> warningOutPut;
+        private MBTCPLibClass mBTCP;
+
+        public Port(string name, Action<string> warningOutPut)
+        {
+            Tuple<string, int> data = ConvertToPortData(name);
+            this.warningOutPut = warningOutPut;
+            this.IP = data.Item1;
+            this.portNumber = data.Item2;
+            mBTCP = new MBTCPLibClass();
+        }
+        // функция перевода имени порта в данные IP и portNumber
+        // формат константы имени порта LAN:192.168.0.1:502
+        Tuple<string, int> ConvertToPortData(string name)
+        {
+            try
+            {
+                string[] data = name.Split(':');
+                if (data[0].ToUpper() != "LAN" || data.Length < 3)
+                    throw new ArgumentException("Входная строка имела неверный формат");
+                string IP = data[1];
+                int portNumber = Convert.ToInt32(data[2]);
+                return new Tuple<string, int>(IP, portNumber);
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return null;
+            }
+        }
+        // функция подключения к принтеру (открытие порта)
+        public void Open_port()
+        {
+            try
+            {
+                if (mBTCP.MBTCPConnect(IP, (ushort)portNumber) != 0)
+                    throw new Exception("Не удалось подключиться");
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+            }
+        }
+        // функция отключения от принтера (закрытие порта)
+        public void Close_port()
+        {
+            try
+            {
+                if (mBTCP.MBTCPDisconnect() != 0)
+                    throw new Exception("Не удалось отключиться");
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+            }
+        }
+        // функция установки настроек подключения
+        public void Setting(int retryCount, int timeOut)
+        {
+            mBTCP.MBTCPSetting(retryCount, timeOut);
+        }
+        // функция считывания данных из регистра хранения
+        public byte[] ReadRegister(ReadData address, int responseLength)
+        {
+            try
+            {
+                byte[] bufResponse = new byte[responseLength * 2];
+                mBTCP.MBTCPRead(0x01, (byte)Registers.ReadInputRegister, (int)address, responseLength, ref bufResponse);
+                return bufResponse;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return new byte[0];
+            }
+        }
+        // функции записи данных в регистр удержания
+        public byte[] HoldingRegister(WriteData address, int writeDataLength, byte firstByte, byte secondByte)
+        {
+            try
+            {
+                byte[] bufResponse = new byte[writeDataLength * 2];
+                mBTCP.MBTCPWrite(0x01, (byte)Registers.WriteHoldingRegister, (int)address, writeDataLength, new byte[] { firstByte, secondByte }, ref bufResponse);
+                return bufResponse;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return new byte[0];
+            }
+        }
+
+        public byte[] HoldingRegister(WriteData address, int writeDataLength, byte[] writeBuffer)
+        {
+            try
+            {
+                byte[] bufResponse = new byte[writeDataLength * 2];
+                mBTCP.MBTCPWrite(0x01, (byte)Registers.WriteHoldingRegister, (int)address, writeDataLength, writeBuffer, ref bufResponse);
+                return bufResponse;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return new byte[0];
+            }
+        }
+
+        public byte[] HoldingRegister(int address, int writeDataLength, byte firstByte, byte secondByte)
+        {
+            try
+            {
+                byte[] bufResponse = new byte[writeDataLength * 2];
+                mBTCP.MBTCPWrite(0x01, (byte)Registers.WriteHoldingRegister, address, writeDataLength, new byte[] { firstByte, secondByte }, ref bufResponse);
+                return bufResponse;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return new byte[0];
+            }
+        }
+
+        public byte[] HoldingRegister(int address, int writeDataLength, byte[] writeBuffer)
+        {
+            try
+            {
+                byte[] bufResponse = new byte[writeDataLength * 2];
+                mBTCP.MBTCPWrite(0x01, (byte)Registers.WriteHoldingRegister, address, writeDataLength, writeBuffer, ref bufResponse);
+                return bufResponse;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return new byte[0];
+            }
+        }
+    }
+
+    // класс для работы с принтером
+    public class DLL
+    {
+        private bool firstCode = true;
+
+        // класс для имитации работы порта
+        private Port port;
+
+        // метод для вывода ошибок (например, в лог)
+        public Action<string> warningOutPut;
+
+        // наименование текущей версии библиотеки
+        public readonly string dllTitle = "Hitachi UX MBTCP DLL v.2.0";
+
+        // конструктор класса управления
+        public DLL(Action<string> warningOutPut)
+        {
+            try
+            {
+                this.warningOutPut = warningOutPut;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+            }
+        }
+
+        // деструктор класса управления
+        ~DLL()
+        {
+            this.Close_port();
+        }
+
+        public override string ToString()
+        {
+            return dllTitle;
+        }
+
+        // функция инициализации порта 
+        public bool Port_initialization(string name, int speed)
+        {
+            try
+            {
+                port = new Port(name, warningOutPut);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return false;
+            }
+        }
+
+        // функция подключения к принтеру (открытие порта)
+        public void Open_port()
+        {
+            port.Open_port();
+        }
+
+        // функция отключения от принтера (закрытие порта)
+        public void Close_port()
+        {
+            port.Close_port();
+        }
+
+        // функция установки настроек подключения NEW
+        public void Setting(int retryCount, int timeOut)
+        {
+            port.Setting(retryCount, timeOut);
+        }
+
+        // функция открытия флага для записи в регистр удержания NEW
+        private void ManageFlag(FLAG flag)
+        {
+            port.HoldingRegister(WriteData.HoldingFlag, 1, 0, (byte)flag);
+        }
+
+        // функция переключения принтера в режим online
+        public void Change_to_online()
+        {
+            port.HoldingRegister(WriteData.Online_Offline, 1, 0, 1);
+        }
+
+        // функция переключения принтера в режим offline
+        public void Change_to_offline()
+        {
+            port.HoldingRegister(WriteData.Online_Offline, 1, 0, 0);
+        }
+
+        // функция включения струи на принтере 
+        public void Operation_start()
+        {
+            port.HoldingRegister(WriteData.RemoteOperation, 1, 0, 0);
+        }
+
+        // функция выключения струи на принтере 
+        public void Operation_stop()
+        {
+            port.HoldingRegister(WriteData.RemoteOperation, 1, 0, 1);
+        }
+
+        // функция переключения принтера в режим "готов"
+        // включает печать на принтере
+        public void Print_start()
+        {
+            if (SecurityModule.Flag_License == false)
+            {
+                System.Threading.Thread.Sleep(15000); // 15 секунд пауза после печати в Demo-режиме
+            }
+
+            port.HoldingRegister(WriteData.RemoteOperation, 1, 0, 2);
+
+            if (SecurityModule.Flag_License == false)
+            {
+                Demo_version();
+                System.Threading.Thread.Sleep(15000); // 15 секунд пауза после печати в Demo-режиме
+            }
+        }
+
+        // функция переключения принтера в режим "ожидание"
+        // выключает печать
+        public void Print_stop()
+        {
+            port.HoldingRegister(WriteData.RemoteOperation, 1, 0, 3);
+        }
+
+        // функция получения серийного номера принтера
+        public string GetPrinterSerial()
+        {
+            try
+            {
+                var response = port.ReadRegister(ReadData.PrinterSerial, 2);
+                int serial = ((int)response[0] << 24) | ((int)response[1] << 16) | ((int)response[2] << 8) | response[3];
+                return serial.ToString();
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return null;
+            }
+        }
+
+        // функция получения коэффициента вязкости чернил
+        public string GetInkViscosity()
+        {
+            try
+            {
+                var response = port.ReadRegister(ReadData.InkViscosity, 1);
+                int inkViscosity = ((int)response[0] << 8) | response[1];
+                return inkViscosity.ToString();
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return null;
+            }
+        }
+
+        // функция получения количества израсходованных чернил в миллилитрах
+        public string GetInk()
+        {
+            try
+            {
+                var response = port.ReadRegister(ReadData.InkConsumption, 2);
+                int inkConsumption = ((int)response[0] << 24) | ((int)response[1] << 16) | ((int)response[2] << 8) | response[3];
+                return inkConsumption.ToString();
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return null;
+            }
+        }
+
+        // функция получения времени работы фильтра чернил
+        public string GetInkFilter()
+        {
+            try
+            {
+                var response = port.ReadRegister(ReadData.InkFilterUseTime, 1);
+                int inkFilterUseTime = ((int)response[0] << 8) | response[1];
+                return inkFilterUseTime.ToString();
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return null;
+            }
+        }
+
+        // опрос принтера о готовности печатать
+        public bool Check_status()
+        {
+            var response = port.ReadRegister(ReadData.ReceiveStatus, 1);
+            int i = ((int)response[0] << 8) | response[1];
+            if (i == 0x31)
+                return true;
+            else
+                return false;
+        }
+
+        // выбор сообщения для печати
+        // number - номер сообщения
+        public void Number_message(string number)
+        {
+            port.HoldingRegister(WriteData.CallMessage, 1, 0, Convert.ToByte(number));
+        }
+
+        // функция очистки 1 ячейки текущего сообщения
+        public void Clear_item()
+        {
+            port.HoldingRegister(WriteData.ClearColumn, 1, 0, 1);
+        }
+
+        // функции выбора формата настроек печати CHANGE
+        public void Format_setup_Individual()
+        {
+            port.HoldingRegister(WriteData.FormatSetup, 1, 0, 1);
+        }
+
+        public void Format_setup_FreeLayout()
+        {
+            port.HoldingRegister(WriteData.FormatSetup, 1, 0, 3);
+        }
+
+        //функция применения шаблона DM-кода к 1 ячейке 1 сообщения CHANGE
+        public void SetFormatDM(DMCode DM)
+        {
+            port.HoldingRegister(WriteData.CharacterSize, 1, 0, 0x08);
+
+            port.HoldingRegister(WriteData.InterCharacterSpace, 1, 0, 0);
+
+            port.HoldingRegister(WriteData.BarCode, 1, 0, (byte)(DM));
+        }
+
+        // функция передачи текста для записи в колонку
+        private void Send_message(string message)
+        {
+            try
+            {
+                byte[] bytesStirng = Helper.StringToByte(warningOutPut, message);
+                byte[] writeBuffer = Helper.CreateSequence(bytesStirng, 4);
+                byte[] writeBufferWithFNC = Helper.AddFNC(writeBuffer);
+
+                //port.HoldingRegister(WriteData.CharacteCode, writeBufferWithFNC.Length / 2, writeBufferWithFNC);
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+            }
+        }
+
+        // функция регистрации сообщения по номеру и имени в памяти принтера
+        public void Registration_number_message(string number, string name)
+        {
+            try
+            {
+                if (name.Length > 12) throw new ArgumentException("Имя регистрируемого сообщения не должно превышать 12 символов");
+
+                while (name.Length < 12)
+                {
+                    name += " ";
+                }
+
+                ManageFlag(FLAG.Open);
+
+                port.HoldingRegister(WriteData.PrintDataMessageNumber, 1, 0, Convert.ToByte(number));
+
+                byte[] bytesStirng = Helper.StringToByte(warningOutPut, name);
+                byte[] writeBuffer = Helper.CreateSequence(bytesStirng, 2);
+
+                port.HoldingRegister(WriteData.MessageNameFirstDigit, writeBuffer.Length / 2, writeBuffer);
+
+                ManageFlag(FLAG.Close);
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+            }
+        }
+
+        // функция передачи информации на печать в матричный код (только в 1 колонку)
+        public void Add_text_to_DM(string part1, string part2)
+        {
+            try
+            {
+                int dataLength = part1.Length + part2.Length + 2;
+                
+                ManageFlag(FLAG.Open);
+
+                if (firstCode == true)
+                {
+                    port.HoldingRegister((int)WriteData.CharacterCount, 1, 0, (byte)(dataLength));
+                    firstCode = false;
+                }
+
+                Send_message(part1);
+                Send_message(part2);
+
+                ManageFlag(FLAG.Close);
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+            }
+        }
+
+        // функция получения количества напечатанных сообщений NEW
+        public int GetPrintCount()
+        {
+            try
+            {
+                var response = port.ReadRegister(ReadData.PrintCount, 2);
+                int printCount = ((int)response[0] << 24) | ((int)response[1] << 16) | ((int)response[2] << 8) | response[3];
+                return printCount;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return int.MinValue;
+            }
+        }
+ 
+        // функция для получения имени модели принтера NEW
+        public string GetModelName()
+        {
+            try
+            {
+                byte[] response = port.ReadRegister(ReadData.ModelName, 16);
+                byte[] rejectResponse = Helper.RejectSequaence(response, 2);
+                return Encoding.ASCII.GetString(rejectResponse);
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(warningOutPut, exception.Message, exception.StackTrace);
+                return null;
+            }
+        }
+
+        // функция проверки результата печати NEW
+        bool PrintComplete(ref int printCount)
+        {
+            int nextCount = GetPrintCount();
+            if ((nextCount - printCount) == 1)
+            {
+                printCount++;
+                return true;
+            }
+            else if ((nextCount - printCount) > 1)
+            {
+                printCount = nextCount;
+                throw new Exception("Напечатано больше 1 дм кода");
+            }
+            return false;
+        }
+
+        // функция инициализации таймера для демо режима
+        private void Demo_version()
+        {
+            Timer aTimer = new System.Timers.Timer();
+            aTimer.Interval = 60000;
+
+            aTimer.Elapsed += OnTimedEvent;
+
+            aTimer.AutoReset = false;
+
+            aTimer.Enabled = true;
+
+        }
+
+        // событие таймера
+        private void OnTimedEvent(Object source, ElapsedEventArgs e)
+        {
+            port.Open_port();
+            Print_stop();
+            port.Close_port();
+        }
+
+        public bool CheckCode(string code, string serial)
+        {
+            return SecurityModule.CheckCode(code, serial);
+        }
+
+        public bool IsDemo()
+        {
+            return !SecurityModule.Flag_License;
+        }
+    }
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+internal static class SecurityModule
+    {
+        static SecurityModule()
+        {
+            KEY1 = DeProtectKEY(KEY2 + KEY1);
+            IV1 = DeProtectKEY(IV2 + IV1);
+        }
+
+        private static string KEY1 = "+Lhpu5sMabTCUGNOeLckNWxw=";
+        private static string KEY2 = "WXXdvHT5aKiAAwF2Mum";
+        private static string IV1 = "kpPjGMKwZN7w==";
+        private static string IV2 = "DSN6KqYkn2";
+        private static string PREFIX = "hitachi_code_";
+
+        public static bool Flag_License { get; private set; } = false;
+
+        public static string DeProtectKEY(string key_protected)
+        {
+            return Convert.ToBase64String(Convert.FromBase64String(key_protected).Select(OHyMM => Convert.ToByte(255 - OHyMM)).ToArray());
+        }
+
+        public static bool CheckCode(string code, string serial)
+        {
+            string word = "";
+
+            using (Aes aes = Aes.Create())
+            {
+                aes.Key = Convert.FromBase64String(KEY1);
+                aes.IV = Convert.FromBase64String(IV1);
+
+                ICryptoTransform decryptor = aes.CreateDecryptor(aes.Key, aes.IV);
+
+                using (MemoryStream msDecrypt = new MemoryStream(Convert.FromBase64String(code)))
+                {
+                    using (CryptoStream csDecrypt = new CryptoStream(msDecrypt, decryptor, CryptoStreamMode.Read))
+                    {
+                        using (StreamReader srDecrypt = new StreamReader(csDecrypt))
+                        {
+                            word = srDecrypt.ReadToEnd();
+                        }
+                    }
+                }
+            }
+
+            word = word.Substring(PREFIX.Length);
+
+            if (word.Equals(serial))
+            {
+                Flag_License = true;
+                return true;
+            }
+            else
+            {
+                Flag_License = false;
+                return false;
+            }
+        }
+    }
+}
+

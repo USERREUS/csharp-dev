@@ -1,0 +1,484 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using HIES.ModbusTcp;
+
+namespace ModbusTCPDLL
+{
+    internal enum FLAG : byte
+    {
+        Open = 1,
+        Close = 2
+    }
+    
+    internal enum DMCode : byte
+    {
+        DM20x20 = 10,
+        DM22x22 = 11,
+        DM24x24 = 12
+    }
+
+    internal enum ReadData : int
+    {
+        PrinterSerial = 0x0020,
+        InkViscosity = 0x0057,
+        InkConsumption = 0x0BE3,
+        InkFilterUseTime = 0x0BD0,
+        ReceiveStatus = 0x0001,
+        BaudRate = 0x0B06,
+        PrintCount = 0x0052
+    }
+
+    internal enum WriteData : int
+    {
+        Online_Offline = 0x2490,
+        RemoteOperation = 0x2494, 
+        CallMessage = 0x1006,
+        ClearColumn = 0x1000,
+        FormatSetup = 0x103F,
+        HoldingFlag = 0x0000,
+        AddColumn = 0x1023,
+        DeleteColumn = 0x1022,
+        DeleteMessage = 0x25F0,
+        CharacterSize = 0x1042,
+        InterCharacterSpace = 0x1043,
+        BarCode = 0x1045,
+        PrintDataMessageNumber = 0x100D,
+        MessageNameFirstDigit = 0x100E,
+        CharacterCount = 0x0020,
+        CharacteCode = 0x0085
+    }
+
+    internal enum Registers : byte
+    { 
+        ReadInputRegister = 0x0003,
+        WriteHoldingRegister = 0x0004
+    }
+
+    internal static class BaudRateConverter
+    {
+        public static readonly int[] buadRate = 
+        { 
+            150, 300, 600, 1200, 2400, 4800, 
+            9600, 19200, 38400, 57600, 115200 
+        };
+    }
+
+    internal static class Helper
+    {
+        public static byte[] StringToByte(string data)
+        {
+            try
+            {
+                int length = data.Length;
+                byte[] bytes = new byte[length];
+                for (int i = 0; i < length; i++)
+                    bytes[i] = Convert.ToByte(data[i]);
+                return bytes;
+            }
+            catch (Exception exception)
+            {
+                DataOutPut(exception.Message, exception.StackTrace);
+                return new byte[0];
+            }
+        }
+
+        public static string DataOutPut(params string[] data)
+        {
+            StringBuilder resultData = new StringBuilder();
+
+            foreach (var item in data)
+                resultData.Append($"{DateTime.Now} : {item}\n");
+
+            return resultData.ToString();
+        }
+    }
+
+    internal public class Controller
+    {
+        private MBTCPLibClass mBTCP;
+        private string iP;
+        private ushort portNumber;
+
+        public Controller(string iP, ushort portNumber)
+        {
+            try
+            {
+                this.iP = iP;
+                this.portNumber = portNumber;
+                mBTCP = new MBTCPLibClass();
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+            }
+        }
+
+        ~Controller()
+        {
+            this.Disconnect();
+        }
+
+        public void Connect()
+        {
+            try
+            {
+                mBTCP.MBTCPConnect(iP, portNumber);
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+            }
+        }
+
+        public void Disconnect()
+        {
+            try
+            {
+                mBTCP.MBTCPDisconnect();
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+            }
+        }
+
+        public void Setting(int retryCount, int timeOut)
+        {
+            mBTCP.MBTCPSetting(retryCount, timeOut);
+        }
+
+        private byte[] ReadRegister(ReadData address, int responseLength)
+        {
+            try
+            {
+                byte[] bufResponse = new byte[responseLength * 2];
+                mBTCP.MBTCPRead(0x01, (byte)Registers.ReadInputRegister, (int)address, responseLength, ref bufResponse);
+                return bufResponse;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+                return new byte[0];
+            }
+        }
+
+        private byte[] HoldingRegister(WriteData address, int writeDataLength, byte firstByte, byte secondByte)
+        {
+            try
+            {
+                byte[] bufResponse = new byte[writeDataLength * 2];
+                mBTCP.MBTCPWrite(0x01, (byte)Registers.WriteHoldingRegister, (int)address, writeDataLength, new byte[] { firstByte, secondByte }, ref bufResponse);
+                return bufResponse;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+                return new byte[0];
+            }
+        }
+
+        private byte[] HoldingRegister(int address, int writeDataLength, byte firstByte, byte secondByte)
+        {
+            try
+            {
+                byte[] bufResponse = new byte[writeDataLength * 2];
+                mBTCP.MBTCPWrite(0x01, (byte)Registers.WriteHoldingRegister, address, writeDataLength, new byte[] { firstByte, secondByte }, ref bufResponse);
+                return bufResponse;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+                return new byte[0];
+            }
+        }
+
+        public void Online()
+        {
+            HoldingRegister(WriteData.Online_Offline, 1, 0, 1);
+        }
+
+        public void Offline()
+        {
+            HoldingRegister(WriteData.Online_Offline, 1, 0, 0);
+        }
+
+        public void StartPrint()
+        {
+            HoldingRegister(WriteData.RemoteOperation, 1, 0, 0);
+        }
+
+        public void StopPrint()
+        {
+            HoldingRegister(WriteData.RemoteOperation, 1, 0, 1);
+        }
+
+        public void DeflectionVoltageControlON()
+        {
+            HoldingRegister(WriteData.RemoteOperation, 1, 0, 2);
+        }
+
+        public void DeflectionVoltageControlOFF()
+        {
+            HoldingRegister(WriteData.RemoteOperation, 1, 0, 3);
+        }
+
+        public int GetPrinterSerial()
+        {
+            try
+            {
+                var response = ReadRegister(ReadData.PrinterSerial, 2);
+                int serial = ((int)response[0] << 24) | ((int)response[1] << 16) | ((int)response[2] << 8) | response[3];
+                return serial;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+                return int.MinValue;
+            }
+        }
+
+        public int GetInkViscosity_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                var response = ReadRegister(ReadData.InkViscosity, 1);
+                int inkViscosity = ((int)response[0] << 8) | response[1];
+                return inkViscosity;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+                return int.MinValue;
+            }
+        }
+
+        public int GetInkConsumption()
+        {
+            try
+            {
+                var response = ReadRegister(ReadData.InkConsumption, 2);
+                int inkConsumption = ((int)response[0] << 24) | ((int)response[1] << 16) | ((int)response[2] << 8) | response[3];
+                return inkConsumption;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+                return int.MinValue;
+            }
+        }
+
+        public int GetInkFilterUseTime()
+        {
+            try
+            {
+                var response = ReadRegister(ReadData.InkFilterUseTime, 1);
+                int inkFilterUseTime = ((int)response[0] << 8) | response[1];
+                return inkFilterUseTime;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+                return int.MinValue;
+            }
+        }
+
+        public bool CheckStatus()
+        {
+            var response = ReadRegister(ReadData.ReceiveStatus, 1);
+            int i = ((int)response[0] << 8) | response[1];
+            if (i == 0x31)
+                return true;
+            else
+                return false;
+        }
+
+        public void CallMessage(byte number)
+        {
+            HoldingRegister(WriteData.CallMessage, 1, 0, number);
+        }
+
+        public void ClearColumn(byte numberOfColumn)
+        {
+            HoldingRegister(WriteData.ClearColumn, 1, 0, numberOfColumn);
+        }
+
+        public void FormatSetupIndividual()
+        {
+            HoldingRegister(WriteData.FormatSetup, 1, 0, 1);
+        }
+
+        public void FormatSetupFreeLayout()
+        {
+            HoldingRegister(WriteData.FormatSetup, 1, 0, 3);
+        }
+
+        public void Flag(FLAG flag)
+        {
+            HoldingRegister(WriteData.HoldingFlag, 1, 0, (byte)flag);
+        }
+
+        public void FaultClear()
+        {
+            HoldingRegister(WriteData.RemoteOperation, 1, 0, 4);
+        }
+
+        public int CheckBaudRate() //FIX
+        {
+            try
+            {
+                var response = ReadRegister(ReadData.BaudRate, 1);
+                int baudRate = ((int)response[0] << 8) | response[1];
+                return BaudRateConverter.buadRate[baudRate];
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+                return int.MinValue;
+            }
+        }
+
+        private void AddColumn()
+        {
+            HoldingRegister(WriteData.AddColumn, 1, 0, 1);
+        }
+
+        private void DeleteColumn()
+        {
+            HoldingRegister(WriteData.DeleteColumn, 1, 0, 1);
+        }
+
+        public void DeleteColumnCascade(byte count)
+        {
+            for (int i = 0; i < count; i++)
+                DeleteColumn();
+        }
+
+        public void DeleteMessage(byte messageNum)
+        {
+            HoldingRegister(WriteData.DeleteMessage, 1, 0, messageNum);
+        }
+
+        private void SetCharacterSize(byte columnIndex)//FIX
+        {
+            HoldingRegister(WriteData.CharacterSize + 24 * columnIndex, 1, 0, 0x08);
+        }
+
+        private void SetInterCharacterSpace(byte columnIndex)//FIX
+        {
+            HoldingRegister(WriteData.InterCharacterSpace + 24 * columnIndex, 1, 0, 0);
+        }
+
+        private void SetBarCode(DMCode DM, byte columnIndex)
+        {
+            HoldingRegister(WriteData.BarCode + 24 * columnIndex, 1, 0, (byte)(DM));
+        }
+
+        public void SetFormatDM(DMCode DM, byte columnIndex)
+        {
+            SetCharacterSize(columnIndex);
+            SetInterCharacterSpace(columnIndex);
+            SetBarCode(DM, columnIndex);
+        }
+
+        private void PrintDataMessageNumber(byte regNumber)
+        {
+            HoldingRegister(WriteData.PrintDataMessageNumber, 1, 0, regNumber);
+        }
+
+        private void RegisterNameDigit(int address, byte symbolCode)
+        {
+            HoldingRegister(address, 1, 0, symbolCode);
+        }
+
+        public void RegistrationMessage(byte regNumber, string regName)//FIX
+        {
+            try
+            {
+                int startAddress = (int)WriteData.MessageNameFirstDigit;
+                byte[] registrationName = Helper.StringToByte(regName);
+
+                Flag(FLAG.Open);
+
+                PrintDataMessageNumber(regNumber);
+
+                for (int i = 0; i < regName.Length; i++)
+                {
+                    RegisterNameDigit(startAddress + i, registrationName[i]);
+                }
+
+                Flag(FLAG.Close);
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+            }
+        }
+
+        private void SetCharacterCount(int address, byte symbolCode)
+        {
+            HoldingRegister(address, 1, 0, symbolCode);
+        }
+
+        private void SetSymbolCode(int address, byte symbolCode)
+        {
+            HoldingRegister(address, 1, 0, symbolCode);
+        }
+
+        public void AddTextToDM(DMCode DM, params string[] Text)
+        {
+            try
+            {
+                List<byte[]> listOfBytes = new List<byte[]>();
+                int startAddress = (int)WriteData.CharacteCode;
+                int dataLength = Text.Length;
+
+                for (int i = 0; i < dataLength; i++)
+                {
+                    listOfBytes.Add(Helper.StringToByte(Text[i]));
+                }
+
+                for (byte i = 0; i < dataLength; i++)
+                {
+                    SetFormatDM(DM, i);
+
+                    if (i != 0)
+                        AddColumn();
+
+                    Flag(FLAG.Open);
+
+                    SetCharacterCount((int)WriteData.CharacterCount + i, (byte)listOfBytes[i].Length);
+
+                    for (int j = 0; j < listOfBytes[i].Length; j++)
+                    {
+                        SetSymbolCode(startAddress, listOfBytes[i][j]);
+                        startAddress += 2;
+                    }
+
+                    Flag(FLAG.Close);
+                }
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+            }
+        }
+
+        public int GetPrintCount()
+        {
+            try
+            {
+                var response = ReadRegister(ReadData.PrintCount, 2);
+                int printCount = ((int)response[0] << 24) | ((int)response[1] << 16) | ((int)response[2] << 8) | response[3];
+                return printCount;
+            }
+            catch (Exception exception)
+            {
+                Helper.DataOutPut(exception.Message, exception.StackTrace);
+                return int.MinValue;
+            }
+        }
+    }
+}

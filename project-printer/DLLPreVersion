@@ -1,0 +1,392 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using HIES.ModbusTcp;
+
+namespace SuperBusiness
+{
+    public partial class TestForm : Form
+    {
+        MBTCPLibClass mBTCPLibClass;
+        string IP = "192.168.0.1";
+        ushort port = 502;
+
+        public TestForm()
+        {
+            InitializeComponent();
+            mBTCPLibClass = new MBTCPLibClass();
+            FormClosing += (sender, eventArgs) =>
+            {
+                var result = MessageBox.Show("Действительно закрыть?", "",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (result != DialogResult.Yes)
+                    eventArgs.Cancel = true;
+            };
+        }
+
+        public static string PrintOnTextBox(params string[] str)
+        {
+            string result = "";
+            foreach (var item in str)
+                result += item + Environment.NewLine;
+            return result;
+        }
+
+        public void DataOutputMethod(params string[] str)
+        {
+            StatusBox.Text += $"{DateTime.Now} R: {PrintOnTextBox(str)}";
+        }
+
+        private void Connect_Click(object sender, EventArgs e)
+        {
+            mBTCPLibClass.MBTCPConnect(IP, port);
+        }
+
+        private void Disconnect_Click(object sender, EventArgs e)
+        {
+            mBTCPLibClass.MBTCPDisconnect();
+        }
+
+        public static string ConvertToReadableInfo(byte[] info, byte count = 20)
+        {
+            var stringInfo = new StringBuilder();
+            string temp;
+            for (int i = 0; i < info.Length - 1; i++)
+            {
+                temp = Convert.ToString(info[i], 16);
+                if (temp.Length == 1)
+                    temp = "0" + temp;
+                stringInfo.Append(temp + " ");
+            }
+            temp = Convert.ToString(info[info.Length - 1], 16);
+            if (temp.Length == 1)
+                temp = "0" + temp;
+            stringInfo.Append(temp);
+            return stringInfo.ToString();
+        }
+
+        private void Online_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x2490, 1, 0, 1)));
+        }
+
+        private byte[] ReadRegister(int regAddress, int length)
+        {
+            var bufResponse = new byte[length * 2];
+            mBTCPLibClass.MBTCPRead(0x01, 0x0003, regAddress, length, ref bufResponse);
+            return bufResponse;
+        }
+
+        private byte[] HoldingRegister(int regAddress, int length, byte firstByte, byte secondByte)
+        {
+            var bufResponse = new byte[length * 2];
+            mBTCPLibClass.MBTCPWrite(0x01, 0x0004, regAddress, length, new byte[] { firstByte, secondByte }, ref bufResponse);
+            return bufResponse;
+        }
+
+        private byte[] StringToByte(string data)
+        {
+            var length = data.Length;
+            var bytes = new byte[length];
+            for (int i = 0; i < length; i++)
+                bytes[i] = Convert.ToByte(data[i]);
+            return bytes;
+        }
+
+        private void Offline_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x2490, 1, 0, 0)));
+        }
+
+        private void Print_start_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x2494, 1, 0, 0)));
+        }
+
+        private void Print_stop_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x2494, 1, 0, 1)));
+        }
+
+        private void Operation_start_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x2494, 1, 0, 2)));
+        }
+
+        private void Operation_stop_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x2494, 1, 0, 3)));
+        }
+
+        private void GetPrinterSerial_Click(object sender, EventArgs e)
+        {
+            var response = ReadRegister(0x0020, 2);
+            DataOutputMethod(ConvertToReadableInfo(response));
+            long i = ((long)response[0] << 24) | ((long)response[1] << 16) | ((long)response[2] << 8) | response[3];
+            SerialNumber.Text = string.Format("{0:00000000}", i);
+        }
+
+        private void GetInkViscosity_Click(object sender, EventArgs e)
+        {
+            var response = ReadRegister(0x0057, 1);
+            DataOutputMethod(ConvertToReadableInfo(response));
+            long i = ((long)response[0] << 16) | ((long)response[0] << 8) | response[1];
+            InkVisk.Text = string.Format("{0:0000}", i);
+        }
+
+        private void GetInk_Click(object sender, EventArgs e)
+        {
+            var response = ReadRegister(0x0BE3, 2);
+            DataOutputMethod(ConvertToReadableInfo(response));
+            long i = ((long)response[0] << 24) | ((long)response[1] << 16) | ((long)response[2] << 8) | response[3];
+            Ink.Text = string.Format("{0:00000000}", i);
+        }
+
+        private void GetInkFilter_Click(object sender, EventArgs e)
+        {
+            var response = ReadRegister(0x0BD0, 1);
+            DataOutputMethod(ConvertToReadableInfo(response));
+            long i = ((long)response[0] << 8) | response[1];
+            InkFilter.Text = string.Format("{0:00000000}", i);
+        }
+
+        private void Check_status_Click(object sender, EventArgs e)
+        {
+            var response = ReadRegister(0x0001, 1);
+            DataOutputMethod(ConvertToReadableInfo(response));
+            long i = ((long)response[0] << 8) | response[1];//FIX
+            if (i == 0x31)
+                Checker_status.BackColor = Color.Green;
+            else
+                Checker_status.BackColor = Color.Red;
+        }
+
+        private void Number_message_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x1006, 1, 0, Convert.ToByte(NumberToCall.Text))));
+        }
+
+        private void Clear_item_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x1000, 1, 0, Convert.ToByte(NumberToCall.Text))));
+            //Как-то надо удалить уже имеющиеся колонки
+        }
+
+        private void Format_setup_Individual_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x103F, 1, 0, 1)));
+        }
+
+        private void Format_setup_Free_layout_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x103F, 1, 0, 3)));
+        }
+
+        private void Registration_number_message_Click(object sender, EventArgs e)
+        {
+            ReceiveIndicator.BackColor = Color.Red;
+            this.Update();
+            byte regNumber = Convert.ToByte(RegNumber.Text);
+            byte[] regName = StringToByte(RegName.Text);
+            int startAddr = 0x100E;
+
+            Flag(FLAG.Open);
+
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x100D, 1, 0, regNumber)));
+            System.Threading.Thread.Sleep(100);
+
+            for (int i = 0; i < regName.Length; i++)
+            {
+                DataOutputMethod(ConvertToReadableInfo(HoldingRegister(startAddr + i, 1, 0, regName[i])));
+                System.Threading.Thread.Sleep(100);
+            }
+
+            Flag(FLAG.Close);
+            ReceiveIndicator.BackColor = Color.LimeGreen;
+        }
+
+        private void Add_text_to_DM_Click(object sender, EventArgs e)
+        {
+            ReceiveIndicator.BackColor = Color.Red;
+            this.Update();
+            List<byte[]> listOfBytes = new List<byte[]>();
+            listOfBytes.Add(StringToByte(Column1.Text));
+            listOfBytes.Add(StringToByte(Column2.Text));
+            listOfBytes.Add(StringToByte(Column3.Text));
+            int startAddr = 0x85;
+
+            for (int i = 0; i < 3; i++)
+            {
+                Format_DM((byte)i);
+
+                if(i != 0)
+                    AddColumn();
+
+                Flag(FLAG.Open);
+
+                DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x20 + i, 1, 0, (byte)listOfBytes[i].Length)));
+                System.Threading.Thread.Sleep(100);
+                for (int j = 0; j < listOfBytes[i].Length; j++)
+                {
+                    DataOutputMethod(ConvertToReadableInfo(HoldingRegister(startAddr, 1, 0, listOfBytes[i][j])));
+                    startAddr += 2;
+                    System.Threading.Thread.Sleep(100);
+                }
+
+                Flag(FLAG.Close);
+            }
+            ReceiveIndicator.BackColor = Color.LimeGreen;
+        }
+
+        private void Format_DM(byte columnIndex)
+        {
+            int DMType = DMList.SelectedIndex;
+
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x1042 + 24 * columnIndex, 1, 0, 0x08)));
+            System.Threading.Thread.Sleep(100);
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x1043 + 24 * columnIndex, 1, 0, 0)));
+            System.Threading.Thread.Sleep(100);
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x1045 + 24 * columnIndex, 1, 0, (byte)(DMType + 10))));
+            System.Threading.Thread.Sleep(100);
+        }
+
+        private void Flag(FLAG flag)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x0000, 1, 0, (byte)flag)));
+            System.Threading.Thread.Sleep(100);
+        }
+
+        private void Fault_Clear_Click(object sender, EventArgs e)
+        {
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x2494, 1, 0, 4)));
+        }
+
+        private void BaudRate_Click(object sender, EventArgs e)
+        {
+            var response = ReadRegister(0x0B06, 1);
+            DataOutputMethod(ConvertToReadableInfo(response));
+            long i = ((long)response[0] << 8) | response[1];
+            BaudRateBox.Text = string.Format("{0:0000}", i);
+        }
+        /*
+private byte[] DeleteColumn(byte indexOfColumn)
+{
+   //Проверить аргумент функции индекс/ номер элемента/ Количество колонок
+   var numberOfItem = Convert.ToByte(numbreOfItemBox.Text);
+   DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x1022, 1, 0, numberOfItem);
+   System.Threading.Thread.Sleep(100);
+   return response;
+}
+*/
+    private void AddColumn()
+    {
+        DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x1023, 1, 0, 1)));
+        System.Threading.Thread.Sleep(100);
+    }
+/*
+private void InsertColumn()
+{
+   var numberOfItem = Convert.ToByte(numbreOfItemBox.Text);
+   DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x1021, 1, 0, numberOfItem);
+   System.Threading.Thread.Sleep(100);
+}
+
+private void DeleteColumnCascade()
+{
+   byte[] response;
+   int position = columnPosition;
+   while (true)
+   {
+       DataOutputMethod(ConvertToReadableInfo(DeleteColumn(position);
+       if (response[0] == 0x90)
+           break;
+       position--;
+   }
+}
+*/
+        private void Add_Column_Click(object sender, EventArgs e)
+        {
+            AddColumn();
+        }
+
+        private void InsertColumn_Click(object sender, EventArgs e)
+        {
+            var numberOfItem = Convert.ToByte(InsertColumnBox.Text);
+            DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x1021, 1, 0, numberOfItem)));
+            System.Threading.Thread.Sleep(100);
+        }
+
+        private void DeleteColumn_Click(object sender, EventArgs e)
+        {
+            //Проверить аргумент функции индекс/ номер элемента/ Количество колонок
+            var numberToDelete = Convert.ToByte(DeleteColumnBox.Text);
+            DeleteColumn(numberToDelete);
+        }
+
+        private byte[] DeleteColumn(byte numberOfCol)
+        {
+            var response = HoldingRegister(0x1022, 1, 0, numberOfCol);
+            DataOutputMethod(ConvertToReadableInfo(response));
+            System.Threading.Thread.Sleep(50);
+            return response;
+        }
+
+        private void DeleteColumnCascade_Click(object sender, EventArgs e)
+        {
+            ReceiveIndicator.BackColor = Color.Red;
+            this.Update();
+
+            System.Threading.Thread.Sleep(1000);
+            for(int i = 0; i < 10; i++)
+                DataOutputMethod(ConvertToReadableInfo(DeleteColumn(1)));
+            ReceiveIndicator.BackColor = Color.LimeGreen;
+        }
+
+        private void ChangeColour(Color color)
+        {
+            ReceiveIndicator.BackColor = color;
+        }
+
+        private void NumberOfThePC_Click(object sender, EventArgs e)
+        {
+            //DataOutputMethod(ConvertToReadableInfo(ReadRegister(0x0008, 1);
+            //long i = ((long)response[0] << 8) | response[1];
+            //NumberOfThePCBox.Text = string.Format("{0:0000}", i);
+
+            //DataOutputMethod(ConvertToReadableInfo(HoldingRegister(0x0008, 1, 0, 3);
+            //System.Threading.Thread.Sleep(50);
+        }
+
+        private byte[] DeleteMessage(byte MessageNum)
+        {
+            var response = HoldingRegister(0x25F0, 1, 0, MessageNum);
+            DataOutputMethod(ConvertToReadableInfo(response));
+            System.Threading.Thread.Sleep(50);
+            return response;
+        }
+
+        private void DeleteMessageButton_Click(object sender, EventArgs e)
+        {
+            DeleteMessage(Convert.ToByte(DeleteMessageBox.Text));
+        }
+
+        private void ClearBox_Click(object sender, EventArgs e)
+        {
+            StatusBox.Clear();
+        }
+
+        private void CurrentMessage_Click(object sender, EventArgs e)
+        {
+            var response = ReadRegister(0x0E40, 1);
+            DataOutputMethod(ConvertToReadableInfo(response));
+            long i = ((long)response[0] << 8) | response[1];
+            CurrentMessageBox.Text = string.Format("{0:0000}", i);
+        }
+    }
+}
